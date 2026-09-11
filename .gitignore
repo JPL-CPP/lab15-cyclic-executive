@@ -1,0 +1,29 @@
+# MPLAB X build artifacts — never commit these
+**/build/
+**/debug/
+**/dist/
+**/disassembly/
+**/nbproject/private/
+**/nbproject/Makefile-*
+**/nbproject/Package-*
+**/*.mk
+funclist
+l.obj
+*.pre
+*.p1
+*.d
+*.o
+*.obj
+*.elf
+*.hex
+*.map
+*.sym
+*.sdb
+*.cmf
+*.hxl
+*.lst
+*.rlf
+
+# OS noise
+.DS_Store
+Thumbs.db
