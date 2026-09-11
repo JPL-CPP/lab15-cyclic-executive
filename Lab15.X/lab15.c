@@ -10,7 +10,7 @@
  *
  *   100 Hz  task_sensor     sample the pot (ADC AN0)
  *    10 Hz  task_thermal    PWM fan speed follows the pot (Lab 10)
- *     1 Hz  task_telemetry  LCD status page (Lab 5/7 driver)
+ *     1 Hz  task_telemetry  RGB OLED mission status page
  *
  * Timer0 fires every 10 ms (the minor frame). The C ISR is only
  * vector plumbing - it reloads the timer and calls the asm
@@ -18,22 +18,30 @@
  * overrun triage: if a frame overruns, telemetry is shed but the
  * sensor/control loop keeps its deadline.
  *
+ * Display budget (the whole point of a 1 Hz telemetry group):
+ * static labels are drawn ONCE at boot; each telemetry tick redraws
+ * only the four value fields (~1.4 KB of pixels ~= 3 ms at 4 Mbit/s
+ * SPI) plus two hardware-accelerated bars (~us). A full-screen
+ * redraw (12 KB ~= 25 ms) would blow the 10 ms frame - try it and
+ * watch the overrun counter if you want proof.
+ *
  * Fault injection: hold S1 (RB4) to make the thermal task busy-wait
- * far past its budget. Watch overruns count up on the LCD while the
- * RC0 frame marker on the scope stays a rock-solid 50 Hz square wave.
+ * far past its budget. Watch OVR count up in red while the RC0
+ * frame marker on the scope stays a rock-solid 50 Hz square wave.
  *
  * Pin Assignments:
  *   RA0 (AN0)  - potentiometer
  *   RC2/CCP1   - PWM out -> 1K -> TIP122 base (fan, Lab 10 wiring)
  *   RC0        - frame marker (scope)
- *   RD0        - LCD RS,  RD2 - LCD EN,  RA4-RA7 - LCD D4-D7
  *   RB4 (S1)   - overrun injection button
+ *   SSD1331 RGB OLED (see OLED.h): RD0=SCK2, RD4=SDO2 (MOSI),
+ *   RD2=DC, RD3=RST, RD5=CS
  */
 
 #include <xc.h>
 #include <stdint.h>
 #include "PIC18F46K22-Config.h"
-#include "LCD.h"
+#include "OLED.h"
 
 #define _XTAL_FREQ 16000000UL
 
@@ -93,6 +101,19 @@ static void init(void) {
     T0CONbits.TMR0ON = 1;
 }
 
+/* Right-aligned unsigned decimal into a fixed-width field */
+static void fmt_u16(char *buf, uint16_t v, uint8_t width) {
+    for (int8_t i = (int8_t)width - 1; i >= 0; i--) {
+        if (v || i == (int8_t)width - 1) {
+            buf[i] = (char)('0' + (v % 10));
+            v /= 10;
+        } else {
+            buf[i] = ' ';
+        }
+    }
+    buf[width] = '\0';
+}
+
 /* ---------------- Rate-group tasks ---------------- */
 
 static void task_sensor(void) {             /* 100 Hz */
@@ -113,27 +134,49 @@ static void task_thermal(void) {            /* 10 Hz */
     }
 }
 
-static void task_telemetry(void) {          /* 1 Hz */
-    LCD_cursor_set(1, 1);
-    LCD_write_string("F:");
-    LCD_write_variable((int32_t)frame_count, 5);
-    LCD_write_string(" OV:");
-    LCD_write_variable((int32_t)ex_overruns, 3);
+static void telemetry_static(void) {        /* drawn ONCE at boot */
+    OLED_clear();
+    OLED_text(0, 1, "STATION STATUS", OLED_CYAN);
+    OLED_fill_rect(0, 9, 96, 1, OLED_CYAN);         /* divider line */
+    OLED_text(2, 0, "FRM:", OLED_WHITE);
+    OLED_text(3, 0, "OVR:", OLED_WHITE);
+    OLED_text(4, 0, "ADC:", OLED_WHITE);
+    OLED_text(6, 0, "PWM:", OLED_WHITE);
+}
 
-    LCD_cursor_set(2, 1);
-    LCD_write_string("ADC:");
-    LCD_write_variable((int32_t)sensor_val, 3);
-    LCD_write_string(" PWM:");
-    LCD_write_variable((int32_t)((uint16_t)sensor_val * 100 / 255), 3);
-    LCD_write_string("%");
+static void task_telemetry(void) {          /* 1 Hz: DELTAS ONLY */
+    char buf[8];
+
+    fmt_u16(buf, frame_count, 5);
+    OLED_text(2, 4, buf, OLED_WHITE);
+
+    fmt_u16(buf, ex_overruns, 3);
+    OLED_text(3, 4, buf, ex_overruns ? OLED_RED : OLED_GREEN);
+
+    fmt_u16(buf, sensor_val, 3);
+    OLED_text(4, 4, buf, OLED_YELLOW);
+
+    uint8_t pct = (uint8_t)((uint16_t)sensor_val * 100 / 255);
+    fmt_u16(buf, pct, 3);
+    OLED_text(6, 4, buf, OLED_ORANGE);
+    OLED_text(6, 7, "%", OLED_ORANGE);
+
+    /* Bars: hardware-accelerated, effectively free */
+    uint8_t w1 = (uint8_t)(((uint16_t)sensor_val * 96) / 255);
+    OLED_fill_rect(0, 40, w1 ? w1 : 1, 6, OLED_GREEN);
+    OLED_fill_rect(w1, 40, (uint8_t)(96 - w1), 6, OLED_BLACK);
+
+    uint8_t w2 = (uint8_t)(((uint16_t)pct * 96) / 100);
+    OLED_fill_rect(0, 56, w2 ? w2 : 1, 6, OLED_ORANGE);
+    OLED_fill_rect(w2, 56, (uint8_t)(96 - w2), 6, OLED_BLACK);
 }
 
 /* ---------------- Main: consume what the executive schedules ------ */
 
 void main(void) {
     init();
-    LCD_init();
-    LCD_clear();
+    OLED_init();
+    telemetry_static();
 
     exec_init();                /* asm: arm the rate counters */
     INTCONbits.GIE = 1;         /* frames start landing NOW */
